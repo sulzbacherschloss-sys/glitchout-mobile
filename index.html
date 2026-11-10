@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>GlitchOut mobile</title>
+  <style>
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: #000;
+      color: #f2f4ff;
+      font-family: system-ui, sans-serif;
+      overflow: hidden;
+    }
+
+    /* The camera picture fills the whole screen. "cover" crops the edges
+       instead of leaving black bars. */
+    video {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    #start {
+      position: fixed;
+      inset: 0;
+      margin: auto;
+      width: 14em;
+      height: 4em;
+      font-size: 1.2em;
+      border: 0;
+      border-radius: 1em;
+      background: #ff2e88;
+      color: #fff;
+    }
+
+    #message {
+      position: fixed;
+      left: 1em;
+      right: 1em;
+      bottom: 2em;
+      text-align: center;
+    }
+
+    /* The control panel sits at the bottom, see-through so the picture
+       stays visible behind it. */
+    #panel {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      padding: 1em 1em calc(1em + env(safe-area-inset-bottom));
+      background: rgba(0, 0, 0, 0.6);
+      font-size: 1.1em;
+    }
+
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 0.8em;
+      margin-bottom: 0.8em;
+    }
+
+    .row input[type="range"] {
+      flex: 1;
+      accent-color: #ff2e88;
+    }
+
+    .row input[type="checkbox"] {
+      width: 1.5em;
+      height: 1.5em;
+      accent-color: #ff2e88;
+    }
+
+    /* Effect chips: big enough for a finger, three per line. */
+    .effects {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 0.5em;
+    }
+
+    .chip {
+      padding: 0.7em 0;
+      border: 2px solid #2ee6ff;
+      border-radius: 0.8em;
+      text-align: center;
+    }
+
+    .chip input {
+      display: none;
+    }
+
+    .chip:has(input:checked) {
+      background: #2ee6ff;
+      color: #000;
+    }
+
+    /* Faded out: invisible and taps go straight through it, so a tap
+       anywhere on the screen can bring it back. */
+    #panel {
+      transition: opacity 0.4s;
+    }
+
+    #panel.is-faded {
+      opacity: 0;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <video id="camera" autoplay playsinline muted></video>
+  <button id="start">Start camera</button>
+  <p id="message"></p>
+
+  <!-- Same switches and labels as the extension popup. Hidden until the
+       camera runs. No sound effects: WhatsApp takes the voice itself. -->
+  <div id="panel" hidden>
+    <label class="row">
+      <input type="checkbox" id="enabled">
+      <span>Bad connection</span>
+    </label>
+
+    <div class="row">
+      <span>How broken?</span>
+      <input type="range" id="intensity" min="0" max="100" step="5">
+      <output id="intensity-value"></output>
+    </div>
+
+    <div class="effects">
+      <label class="chip"><input type="checkbox" data-effect="freeze">Freeze</label>
+      <label class="chip"><input type="checkbox" data-effect="pixelate">Pixels</label>
+      <label class="chip"><input type="checkbox" data-effect="lowFps">Stutter</label>
+      <label class="chip"><input type="checkbox" data-effect="blocks">Blocks</label>
+      <label class="chip"><input type="checkbox" data-effect="blackout">Blackout</label>
+      <label class="chip"><input type="checkbox" data-effect="colorTear">Tear</label>
+    </div>
+  </div>
+
+  <!-- Our own copy of the glitch machine. It puts
+       window.__glitchoutGlitchVideoTrack on the page. -->
+  <script src="glitch.js"></script>
+  <script>
+    'use strict';
+
+    // Same shape as the extension's settings. glitch.js reads this object on
+    // every frame, so changing it later changes the picture right away.
+    const state = {
+      enabled: true,
+      intensity: 60,
+      effects: {
+        freeze: false,
+        pixelate: true,
+        lowFps: false,
+        blocks: false,
+        blackout: false,
+        colorTear: false,
+        audioDrop: false,
+        robot: false,
+      },
+    };
+
+    // Remember the settings in this browser, so a reload keeps them.
+    // localStorage only holds text, so we save the state as JSON text.
+    const SETTINGS_KEY = 'glitchout-mobile-settings';
+
+    function loadSettings() {
+      try {
+        const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY));
+        if (!saved) return;
+        // Copy only the keys we know. A missing key keeps its default, so an
+        // old save without a newer effect still works.
+        if (typeof saved.enabled === 'boolean') state.enabled = saved.enabled;
+        if (typeof saved.intensity === 'number') state.intensity = saved.intensity;
+        for (const name of Object.keys(state.effects)) {
+          if (typeof saved.effects?.[name] === 'boolean') {
+            state.effects[name] = saved.effects[name];
+          }
+        }
+      } catch (error) {
+        // Broken save or storage switched off: just use the defaults.
+      }
+    }
+
+    function saveSettings() {
+      try {
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(state));
+      } catch (error) {
+        // Storage switched off (for example a private tab): nothing saved.
+      }
+    }
+
+    loadSettings();
+
+    const video = document.getElementById('camera');
+    const startButton = document.getElementById('start');
+    const message = document.getElementById('message');
+    const panel = document.getElementById('panel');
+    const enabledBox = document.getElementById('enabled');
+    const slider = document.getElementById('intensity');
+    const sliderValue = document.getElementById('intensity-value');
+
+    // Controls -> state. We only change the state object; glitch.js picks
+    // the new values up on its next frame, so no restart is needed.
+    enabledBox.checked = state.enabled;
+    enabledBox.addEventListener('change', () => {
+      state.enabled = enabledBox.checked;
+    });
+
+    function showIntensity() {
+      sliderValue.textContent = state.intensity + '%';
+    }
+    slider.value = state.intensity;
+    showIntensity();
+    slider.addEventListener('input', () => {
+      state.intensity = Number(slider.value);
+      showIntensity();
+    });
+
+    for (const box of document.querySelectorAll('[data-effect]')) {
+      const name = box.dataset.effect;
+      box.checked = state.effects[name];
+      box.addEventListener('change', () => {
+        state.effects[name] = box.checked;
+      });
+    }
+
+    // The panel fades out after a few quiet seconds, so the other side of
+    // the call only sees the picture. Every tap or slider move starts the
+    // countdown again.
+    const HIDE_AFTER_MS = 4000;
+    let hideTimer = null;
+
+    function showPanelForAWhile() {
+      panel.classList.remove('is-faded');
+      clearTimeout(hideTimer);
+      hideTimer = setTimeout(() => panel.classList.add('is-faded'), HIDE_AFTER_MS);
+    }
+
+    document.addEventListener('pointerdown', showPanelForAWhile);
+    panel.addEventListener('input', showPanelForAWhile);
+    // Every switch and the slider send a "change" event that bubbles up to
+    // the panel, so this one listener saves all of them. Not "input": a
+    // switch fires that before its own handler has updated the state.
+    // The slider sends "change" when the finger lets go.
+    panel.addEventListener('change', saveSettings);
+
+    // Keep the screen on while the camera runs. Without this the phone goes
+    // dark after a while without touches, and the call only sees black.
+    // The phone drops the lock whenever the page is hidden (other app,
+    // screen off), so we ask again each time the page comes back.
+    let wakeLock = null;
+    let cameraRunning = false;
+
+    async function keepScreenOn() {
+      if (!('wakeLock' in navigator) || wakeLock) return;
+      try {
+        wakeLock = await navigator.wakeLock.request('screen');
+        console.log('[GlitchOut] screen stays on');
+        wakeLock.addEventListener('release', () => {
+          wakeLock = null;
+        });
+      } catch (error) {
+        // Not allowed right now (for example battery saver): carry on.
+        console.warn('[GlitchOut] wake lock:', error.name);
+      }
+    }
+
+    document.addEventListener('visibilitychange', () => {
+      if (cameraRunning && document.visibilityState === 'visible') {
+        keepScreenOn();
+      }
+    });
+
+    // A button instead of starting right away: the phone only allows full
+    // screen after a real tap, and the camera question makes more sense then.
+    startButton.addEventListener('click', async () => {
+      message.textContent = '';
+      try {
+        // "user" = the front camera. No microphone: WhatsApp takes the
+        // voice itself, this page only makes the picture.
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'user' },
+          audio: false,
+        });
+        // Camera in, glitched picture out - then we show the glitched one.
+        const cameraTrack = stream.getVideoTracks()[0];
+        const glitchedTrack = window.__glitchoutGlitchVideoTrack(cameraTrack, state);
+        video.srcObject = new MediaStream([glitchedTrack]);
+        startButton.hidden = true;
+        panel.hidden = false;
+        showPanelForAWhile();
+        cameraRunning = true;
+        keepScreenOn();
+        document.documentElement.requestFullscreen?.().catch(() => {});
+      } catch (error) {
+        console.warn('[GlitchOut] camera:', error.name);
+        message.textContent = 'No camera: ' + error.name;
+      }
+    });
+  </script>
+</body>
+</html>
